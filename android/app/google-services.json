@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "751966605925",
+    "project_id": "msa-chat-c3724",
+    "storage_bucket": "msa-chat-c3724.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:751966605925:android:e6ca153d185fadb7a66c8c",
+        "android_client_info": {
+          "package_name": "com.example.msa_chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAh3xMJSVt3OZXDTUATAPG-pnQisO01PH8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
