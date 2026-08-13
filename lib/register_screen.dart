@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, ThemeController;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 import 'login_screen.dart';
@@ -13,7 +13,8 @@ class RegisterScreen extends StatefulWidget {
   State<RegisterScreen> createState() => _RegisterScreenState();
 }
 
-class _RegisterScreenState extends State<RegisterScreen> {
+class _RegisterScreenState extends State<RegisterScreen>
+    with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
@@ -29,6 +30,36 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _obscureConfirmPassword = true;
 
   TextEditingController? _activeController;
+
+  late final AnimationController _entranceController;
+  late final Animation<double> _cardFade;
+  late final Animation<Offset> _cardSlide;
+
+  @override
+  void initState() {
+    super.initState();
+    _entranceController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 550),
+    );
+    _cardFade = CurvedAnimation(parent: _entranceController, curve: Curves.easeOut);
+    _cardSlide = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _entranceController, curve: Curves.easeOutCubic));
+    _entranceController.forward();
+  }
+
+  @override
+  void dispose() {
+    _entranceController.dispose();
+    _nameController.dispose();
+    _emailController.dispose();
+    _idController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
 
   void _hideKeyboard() {
     setState(() => _activeController = null);
@@ -177,31 +208,66 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: GestureDetector(
-                onTap: _hideKeyboard,
-                behavior: HitTestBehavior.opaque,
-                child: Center(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 32,
-                    ),
-                    child: Form(
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              AppColors.primary.withValues(alpha: ThemeController.instance.isDark.value ? 0.20 : 0.09),
+              AppColors.background,
+            ],
+            stops: const [0.0, 0.35],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: _hideKeyboard,
+                  behavior: HitTestBehavior.opaque,
+                  child: Center(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 32,
+                      ),
+                      child: FadeTransition(
+                        opacity: _cardFade,
+                        child: SlideTransition(
+                          position: _cardSlide,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(maxWidth: 420),
+                            child: Container(
+                              padding: EdgeInsets.fromLTRB(24, 32, 24, 24),
+                              decoration: BoxDecoration(
+                                color: AppColors.fieldFill,
+                                borderRadius: BorderRadius.circular(24),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: AppColors.primary.withValues(alpha: 0.10),
+                                    blurRadius: 28,
+                                    offset: Offset(0, 12),
+                                  ),
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.04),
+                                    blurRadius: 6,
+                                    offset: Offset(0, 2),
+                                  ),
+                                ],
+                              ),
+                              child: Form(
                       key: _formKey,
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: 420),
-                        child: Column(
+                                child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             Center(
                               child: Image.asset(
                                 'assets/images/logo.png',
-                                width: 150,
+                                width: 130,
                               ),
                             ),
                             SizedBox(height: 16),
@@ -400,6 +466,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                 padding: EdgeInsets.symmetric(
                                   vertical: 16,
                                 ),
+                                elevation: 4,
+                                shadowColor: AppColors.primary.withValues(alpha: 0.5),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
@@ -457,19 +525,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
                               ],
                             ),
                           ],
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-            if (_activeController != null)
-              VirtualKeyboard(
-                controller: _activeController!,
-                onDone: _hideKeyboard,
-              ),
-          ],
+              if (_activeController != null)
+                VirtualKeyboard(
+                  controller: _activeController!,
+                  onDone: _hideKeyboard,
+                ),
+            ],
+          ),
         ),
       ),
     );

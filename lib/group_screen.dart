@@ -13,6 +13,33 @@ import 'profile_screen.dart';
 
 const _lastNotifSeenKeyPrefix = 'last_notif_seen_millis_';
 
+// Shared confirmation dialog so a stray tap on the logout icon can't sign
+// someone out instantly. Used by both the student and staff group screens.
+Future<bool> _confirmLogout(BuildContext context) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text('Log out?'),
+      content: Text('Are you sure you want to log out of MSA_Chat?'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: Text('Cancel', style: TextStyle(color: Colors.grey)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: Text(
+            'Log Out',
+            style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    ),
+  );
+  return confirmed ?? false;
+}
+
 // The "seen" marker must be per-account, not per-browser — otherwise one
 // account's "already read" state leaks into the next account that logs
 // in on the same device.
@@ -140,6 +167,9 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _logout(BuildContext context) async {
+    final confirmed = await _confirmLogout(context);
+    if (!confirmed) return;
+    if (!context.mounted) return;
     if (_currentUserId.isNotEmpty) await setUserOffline(_currentUserId);
     await FirebaseAuth.instance.signOut();
     if (!context.mounted) return;
@@ -701,6 +731,9 @@ class _GroupScreenState extends State<GroupScreen> {
   }
 
   Future<void> _logout(BuildContext context) async {
+    final confirmed = await _confirmLogout(context);
+    if (!confirmed) return;
+    if (!context.mounted) return;
     if (_currentUserId.isNotEmpty) await setUserOffline(_currentUserId);
     await FirebaseAuth.instance.signOut();
     if (!context.mounted) return;
