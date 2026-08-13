@@ -164,15 +164,34 @@ class _SplashScreenState extends State<SplashScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _fadeAnimation;
+  late final Animation<double> _scaleAnimation;
+  late final Animation<Offset> _textSlideAnimation;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 900),
+      duration: const Duration(milliseconds: 1100),
     );
-    _fadeAnimation = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
+    _fadeAnimation = CurvedAnimation(
+      parent: _controller,
+      curve: const Interval(0.0, 0.65, curve: Curves.easeIn),
+    );
+    // Logo eases in with a gentle overshoot instead of just fading —
+    // reads as "arriving" rather than "appearing".
+    _scaleAnimation = Tween<double>(begin: 0.82, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutBack),
+    );
+    _textSlideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.3),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.35, 1.0, curve: Curves.easeOut),
+      ),
+    );
     _controller.forward();
     _goToNextScreen();
   }
@@ -206,22 +225,85 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
-      body: Center(
-        child: FadeTransition(
-          opacity: _fadeAnimation,
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              AppColors.primary.withValues(alpha: ThemeController.instance.isDark.value ? 0.22 : 0.10),
+              AppColors.background,
+            ],
+          ),
+        ),
+        child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/images/logo.png', width: 260),
-              SizedBox(height: 16),
-              Text(
-                'MSA_Chat',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.primaryDark,
-                  letterSpacing: 0.5,
+              FadeTransition(
+                opacity: _fadeAnimation,
+                child: ScaleTransition(
+                  scale: _scaleAnimation,
+                  child: Container(
+                    padding: EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.fieldFill,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppColors.primary.withValues(alpha: 0.18),
+                          blurRadius: 30,
+                          spreadRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: Image.asset('assets/images/logo.png', width: 200),
+                  ),
+                ),
+              ),
+              SizedBox(height: 22),
+              SlideTransition(
+                position: _textSlideAnimation,
+                child: FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: Text(
+                    'MSA_Chat',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.primaryDark,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: 6),
+              SlideTransition(
+                position: _textSlideAnimation,
+                child: FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: Text(
+                    'Muhab Skills Academy',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: 36),
+              FadeTransition(
+                opacity: _fadeAnimation,
+                child: SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.4,
+                    color: AppColors.accent,
+                  ),
                 ),
               ),
             ],
