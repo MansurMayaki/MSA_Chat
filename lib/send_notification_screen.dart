@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, buildAppBar;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 
@@ -68,11 +68,7 @@ class _SendNotificationScreenState extends State<SendNotificationScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-        title: Text('Send Notification'),
-      ),
+      appBar: buildAppBar(title: 'Send Notification'),
       body: SafeArea(
         child: Column(
           children: [
@@ -129,6 +125,8 @@ class _SendNotificationScreenState extends State<SendNotificationScreen> {
                         backgroundColor: AppColors.primary,
                         foregroundColor: Colors.white,
                         padding: EdgeInsets.symmetric(vertical: 16),
+                        elevation: 4,
+                        shadowColor: AppColors.primary.withValues(alpha: 0.5),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),

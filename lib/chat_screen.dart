@@ -5,7 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, AppRadius, slideRoute;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 import 'profile_screen.dart' show UserProfileViewScreen;
@@ -48,9 +48,31 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String get _chatId => chatIdFor(_currentUserId, widget.otherUserId);
 
+  // Created once per screen instance instead of inline in build(). A
+  // StreamBuilder treats a new Stream object as "different" even when the
+  // underlying query is identical, so building these inline would cancel
+  // and reopen every Firestore listener on this screen on every rebuild
+  // (e.g. every time dark mode is toggled, or setState runs for any
+  // reason) — visible as a flash back to a loading state.
+  late final Stream<DocumentSnapshot> _chatDocStream;
+  late final Stream<DocumentSnapshot> _otherUserDocStream;
+  late final Stream<QuerySnapshot> _messagesStream;
+
   @override
   void initState() {
     super.initState();
+    _chatDocStream =
+        FirebaseFirestore.instance.collection('chats').doc(_chatId).snapshots();
+    _otherUserDocStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(widget.otherUserId)
+        .snapshots();
+    _messagesStream = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .collection('messages')
+        .orderBy('sentAt', descending: true)
+        .snapshots();
     _markAsRead();
     _messageController.addListener(_onMessageChanged);
   }
@@ -360,7 +382,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // the more useful thing to show.
   Widget _statusSubtitle() {
     return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance.collection('chats').doc(_chatId).snapshots(),
+      stream: _chatDocStream,
       builder: (context, chatSnapshot) {
         bool otherIsTyping = false;
         if (chatSnapshot.data != null && chatSnapshot.data!.exists) {
@@ -377,10 +399,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
 
         return StreamBuilder<DocumentSnapshot>(
-          stream: FirebaseFirestore.instance
-              .collection('users')
-              .doc(widget.otherUserId)
-              .snapshots(),
+          stream: _otherUserDocStream,
           builder: (context, userSnapshot) {
             if (userSnapshot.data == null || !userSnapshot.data!.exists) {
               return SizedBox.shrink();
@@ -421,30 +440,38 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            gradient: AppColors.appBarGradient,
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.primary.withValues(alpha: 0.28),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+        ),
         title: Row(
           children: [
             GestureDetector(
               onTap: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (context) => UserProfileViewScreen(
-                      userId: widget.otherUserId,
-                      fallbackName: widget.otherUserName,
-                    ),
-                  ),
+                  slideRoute(UserProfileViewScreen(
+                    userId: widget.otherUserId,
+                    fallbackName: widget.otherUserName,
+                  )),
                 );
               },
               // The chat only knows the other user's name/id from
               // navigation — their photo is streamed live from their user
               // doc so this always shows their actual current DP.
               child: StreamBuilder<DocumentSnapshot>(
-                stream: FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(widget.otherUserId)
-                    .snapshots(),
+                stream: _otherUserDocStream,
                 builder: (context, userSnapshot) {
                   final userData = userSnapshot.data?.data() as Map<String, dynamic>?;
                   final photoBase64 = userData?['photoBase64'] as String?;
@@ -498,10 +525,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onTap: _hideKeyboard,
                 behavior: HitTestBehavior.opaque,
                 child: StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('chats')
-                      .doc(_chatId)
-                      .snapshots(),
+                  stream: _chatDocStream,
                   builder: (context, chatSnapshot) {
                     Timestamp? otherUserReadAt;
                     if (chatSnapshot.data != null && chatSnapshot.data!.exists) {
@@ -512,12 +536,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
 
                     return StreamBuilder<QuerySnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('chats')
-                      .doc(_chatId)
-                      .collection('messages')
-                      .orderBy('sentAt', descending: true)
-                      .snapshots(),
+                  stream: _messagesStream,
                   builder: (context, snapshot) {
                     if (snapshot.connectionState == ConnectionState.waiting) {
                       return Center(
@@ -629,6 +648,14 @@ class _ChatScreenState extends State<ChatScreen> {
                               border: isMine
                                   ? null
                                   : Border.all(color: AppColors.fieldBorder),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: (isMine ? AppColors.primary : Colors.black)
+                                      .withValues(alpha: 0.08),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.end,
@@ -686,10 +713,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onTap: () {
                                       Navigator.push(
                                         context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              _FullscreenImageViewer(imageBytes: imageBytes!),
-                                        ),
+                                        slideRoute(_FullscreenImageViewer(imageBytes: imageBytes!)),
                                       );
                                     },
                                     child: ClipRRect(

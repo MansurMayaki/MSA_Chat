@@ -104,8 +104,9 @@ class _NotificationOverlayState extends State<_NotificationOverlay>
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: (widget.isError ? Colors.redAccent : AppColors.primary)
-                        .withValues(alpha: 0.18),
+                    color:
+                        (widget.isError ? Colors.redAccent : AppColors.primary)
+                            .withValues(alpha: 0.18),
                     blurRadius: 24,
                     spreadRadius: 2,
                   ),
@@ -115,7 +116,9 @@ class _NotificationOverlayState extends State<_NotificationOverlay>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    widget.isError ? Icons.error_outline : Icons.check_circle_outline,
+                    widget.isError
+                        ? Icons.error_outline
+                        : Icons.check_circle_outline,
                     color: widget.isError ? Colors.redAccent : AppColors.accent,
                     size: 48,
                   ),

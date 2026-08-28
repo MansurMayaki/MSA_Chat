@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, AppRadius, appCardShadow, buildAppBar, slideRoute;
 import 'login_screen.dart';
 import 'broadcasts_screen.dart';
 import 'send_notification_screen.dart';
@@ -10,6 +10,8 @@ import 'presence.dart';
 import 'chat_screen.dart';
 import 'chats_list_screen.dart';
 import 'profile_screen.dart';
+import 'user_record_screen.dart';
+import 'account_search_screen.dart';
 
 const _lastNotifSeenKeyPrefix = 'last_notif_seen_millis_';
 
@@ -144,6 +146,21 @@ class _MainScreenState extends State<MainScreen> {
 
   bool get _isStaff => widget.role == 'staff';
 
+  // Rebuilt only when _lastSeenMillis actually changes (see the setters
+  // below), not on every rebuild — so an unrelated rebuild, like toggling
+  // dark mode, doesn't tear down and reopen this Firestore listener.
+  late Stream<QuerySnapshot> _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+
+  Stream<QuerySnapshot> _buildUnreadBroadcastsStream() {
+    return FirebaseFirestore.instance
+        .collection('broadcasts')
+        .where(
+          'sentAt',
+          isGreaterThan: Timestamp.fromMillisecondsSinceEpoch(_lastSeenMillis),
+        )
+        .snapshots();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -152,7 +169,12 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _loadLastSeen() async {
     final millis = await _loadLastNotifSeenMillis();
-    if (mounted) setState(() => _lastSeenMillis = millis);
+    if (mounted) {
+      setState(() {
+        _lastSeenMillis = millis;
+        _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+      });
+    }
   }
 
   void _onTabTapped(int index) {
@@ -162,7 +184,10 @@ class _MainScreenState extends State<MainScreen> {
     if (index == 2) {
       final now = DateTime.now().millisecondsSinceEpoch;
       _saveLastNotifSeenMillis(now);
-      setState(() => _lastSeenMillis = now);
+      setState(() {
+        _lastSeenMillis = now;
+        _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+      });
     }
   }
 
@@ -175,7 +200,7 @@ class _MainScreenState extends State<MainScreen> {
     if (!context.mounted) return;
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (context) => const LoginScreen()),
+      slideRoute(const LoginScreen()),
       (route) => false,
     );
   }
@@ -196,19 +221,20 @@ class _MainScreenState extends State<MainScreen> {
 
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        elevation: 0,
-        automaticallyImplyLeading: false,
-        title: Text(
-          titles[_selectedIndex],
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 18,
-          ),
-        ),
+      appBar: buildAppBar(
+        title: titles[_selectedIndex],
         actions: [
+          if (_isStaff)
+            IconButton(
+              icon: Icon(Icons.person_search_outlined, color: Colors.white),
+              tooltip: 'Find an account',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  slideRoute(const AccountSearchScreen()),
+                );
+              },
+            ),
           if (_selectedIndex == 0)
             IconButton(
               icon: Icon(Icons.forum_outlined, color: Colors.white),
@@ -216,18 +242,7 @@ class _MainScreenState extends State<MainScreen> {
               onPressed: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => ChatsListScreen()),
-                );
-              },
-            ),
-          if (_selectedIndex == 2 && _isStaff)
-            IconButton(
-              icon: Icon(Icons.campaign_outlined, color: Colors.white),
-              tooltip: 'Send Announcement',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => SendNotificationScreen()),
+                  slideRoute(ChatsListScreen()),
                 );
               },
             ),
@@ -239,6 +254,19 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
       body: IndexedStack(index: _selectedIndex, children: tabs),
+      floatingActionButton: (_selectedIndex == 2 && _isStaff)
+          ? FloatingActionButton(
+              backgroundColor: AppColors.primary,
+              tooltip: 'New Announcement',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  slideRoute(SendNotificationScreen()),
+                );
+              },
+              child: Icon(Icons.add, color: Colors.white),
+            )
+          : null,
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: _onTabTapped,
@@ -269,13 +297,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _announcementsIcon({required bool active}) {
     return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('broadcasts')
-          .where(
-            'sentAt',
-            isGreaterThan: Timestamp.fromMillisecondsSinceEpoch(_lastSeenMillis),
-          )
-          .snapshots(),
+      stream: _unreadBroadcastsStream,
       builder: (context, snapshot) {
         final unread = _countUnread(snapshot, _currentUserId);
         return Stack(
@@ -335,9 +357,17 @@ class _ChooseGroupScreenState extends State<ChooseGroupScreen> {
 
   String get _currentUserId => FirebaseAuth.instance.currentUser?.uid ?? '';
 
+  // Static for the life of this screen (same signed-in user throughout),
+  // so caching it once avoids reopening this listener on every rebuild.
+  late final Stream<QuerySnapshot> _myChatsStream;
+
   @override
   void initState() {
     super.initState();
+    _myChatsStream = FirebaseFirestore.instance
+        .collection('chats')
+        .where('participants', arrayContains: _currentUserId)
+        .snapshots();
     _loadLastSeen();
     if (_currentUserId.isNotEmpty) setUserOnline(_currentUserId);
   }
@@ -353,10 +383,7 @@ class _ChooseGroupScreenState extends State<ChooseGroupScreen> {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('chats')
-          .where('participants', arrayContains: _currentUserId)
-          .snapshots(),
+      stream: _myChatsStream,
       builder: (context, chatsSnapshot) {
         final unreadByGroup = _computeUnreadChatCountsByGroup(
           chatsSnapshot.data?.docs ?? [],
@@ -364,22 +391,35 @@ class _ChooseGroupScreenState extends State<ChooseGroupScreen> {
         );
 
         return ListView.separated(
-          padding: EdgeInsets.all(16),
+          padding: EdgeInsets.all(14),
           itemCount: _groups.length,
           separatorBuilder: (context, index) => SizedBox(height: 12),
           itemBuilder: (context, index) {
+            final delay = 60 * index;
             final g = _groups[index];
             final groupKey = g['key'] as String;
-            return _GroupCard(
-              groupKey: groupKey,
-              label: g['label'] as String,
-              icon: g['icon'] as IconData,
-              role: widget.role,
-              showNotifBadge: groupKey == 'staff',
-              lastSeenMillis: _lastSeenMillis,
-              currentUserId: _currentUserId,
-              onReturn: _loadLastSeen,
-              unreadChatCount: unreadByGroup[groupKey] ?? 0,
+            return TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.0, end: 1.0),
+              duration: Duration(milliseconds: 320 + delay),
+              curve: Curves.easeOutCubic,
+              builder: (context, value, child) => Opacity(
+                opacity: value,
+                child: Transform.translate(
+                  offset: Offset(0, (1 - value) * 14),
+                  child: child,
+                ),
+              ),
+              child: _GroupCard(
+                groupKey: groupKey,
+                label: g['label'] as String,
+                icon: g['icon'] as IconData,
+                role: widget.role,
+                showNotifBadge: false,
+                lastSeenMillis: _lastSeenMillis,
+                currentUserId: _currentUserId,
+                onReturn: _loadLastSeen,
+                unreadChatCount: unreadByGroup[groupKey] ?? 0,
+              ),
             );
           },
         );
@@ -438,7 +478,7 @@ String _labelForGroupKey(String key) {
   return match['label'] as String;
 }
 
-class _GroupCard extends StatelessWidget {
+class _GroupCard extends StatefulWidget {
   final String groupKey;
   final String label;
   final IconData icon;
@@ -462,39 +502,67 @@ class _GroupCard extends StatelessWidget {
   });
 
   @override
+  State<_GroupCard> createState() => _GroupCardState();
+}
+
+class _GroupCardState extends State<_GroupCard> {
+  // groupKey is fixed for this card's whole lifetime (each card always
+  // represents the same group), so this only needs to be built once —
+  // caching it here means a parent rebuild (e.g. dark mode toggling)
+  // doesn't tear down and reopen this listener.
+  late final Stream<QuerySnapshot> _membersStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _membersStream = FirebaseFirestore.instance
+        .collection('users')
+        .where('group', isEqualTo: widget.groupKey)
+        .snapshots();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.fieldFill,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        boxShadow: appCardShadow(),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.lg),
         onTap: () async {
           await Navigator.push(
             context,
-            MaterialPageRoute(
-              builder: (context) => GroupScreen(group: groupKey, role: role),
-            ),
+            slideRoute(GroupScreen(group: widget.groupKey, role: widget.role)),
           );
           // Refresh our unread badge in case notifications were viewed
           // while inside that group.
-          onReturn();
+          widget.onReturn();
         },
         child: Container(
           padding: EdgeInsets.symmetric(horizontal: 18, vertical: 18),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.fieldBorder),
-          ),
           child: Row(
             children: [
               Container(
-                width: 48,
-                height: 48,
+                width: 50,
+                height: 50,
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(12),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      AppColors.primary.withValues(alpha: 0.16),
+                      AppColors.accent.withValues(alpha: 0.14),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(14),
                 ),
-                child: Icon(icon, color: AppColors.primary),
+                child: Icon(widget.icon, color: AppColors.primary),
               ),
               SizedBox(width: 14),
               Expanded(
@@ -504,14 +572,14 @@ class _GroupCard extends StatelessWidget {
                     Row(
                       children: [
                         Text(
-                          label,
+                          widget.label,
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w700,
                             color: AppColors.primaryDark,
                           ),
                         ),
-                        if (showNotifBadge) ...[
+                        if (widget.showNotifBadge) ...[
                           SizedBox(width: 8),
                           StreamBuilder<QuerySnapshot>(
                             stream: FirebaseFirestore.instance
@@ -519,11 +587,11 @@ class _GroupCard extends StatelessWidget {
                                 .where(
                                   'sentAt',
                                   isGreaterThan: Timestamp.fromMillisecondsSinceEpoch(
-                                      lastSeenMillis),
+                                      widget.lastSeenMillis),
                                 )
                                 .snapshots(),
                             builder: (context, snapshot) {
-                              final unread = _countUnread(snapshot, currentUserId);
+                              final unread = _countUnread(snapshot, widget.currentUserId);
                               if (unread == 0) return SizedBox.shrink();
                               return Container(
                                 padding: EdgeInsets.symmetric(
@@ -552,7 +620,7 @@ class _GroupCard extends StatelessWidget {
                             },
                           ),
                         ],
-                        if (unreadChatCount > 0) ...[
+                        if (widget.unreadChatCount > 0) ...[
                           SizedBox(width: 8),
                           Container(
                             padding: EdgeInsets.symmetric(
@@ -568,7 +636,7 @@ class _GroupCard extends StatelessWidget {
                                     color: Colors.white, size: 12),
                                 SizedBox(width: 3),
                                 Text(
-                                  unreadChatCount > 9 ? '9+' : '$unreadChatCount',
+                                  widget.unreadChatCount > 9 ? '9+' : '${widget.unreadChatCount}',
                                   style: TextStyle(
                                     color: Colors.white,
                                     fontSize: 11,
@@ -583,10 +651,7 @@ class _GroupCard extends StatelessWidget {
                     ),
                     SizedBox(height: 4),
                     StreamBuilder<QuerySnapshot>(
-                      stream: FirebaseFirestore.instance
-                          .collection('users')
-                          .where('group', isEqualTo: groupKey)
-                          .snapshots(),
+                      stream: _membersStream,
                       builder: (context, snapshot) {
                         final count = snapshot.data?.docs.length ?? 0;
                         return Text(
@@ -603,6 +668,7 @@ class _GroupCard extends StatelessWidget {
               Icon(Icons.chevron_right, color: Colors.grey),
             ],
           ),
+        ),
         ),
       ),
     );
@@ -626,6 +692,25 @@ class _GroupScreenState extends State<GroupScreen> {
 
   String get _currentUserId => FirebaseAuth.instance.currentUser?.uid ?? '';
 
+  // widget.group is fixed for this screen's whole lifetime, so this only
+  // needs to be built once.
+  late final Stream<QuerySnapshot> _membersStream;
+
+  // Rebuilt only when _lastSeenMillis actually changes — not on every
+  // rebuild — so an unrelated rebuild (e.g. dark mode) doesn't tear down
+  // and reopen this listener.
+  late Stream<QuerySnapshot> _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+
+  Stream<QuerySnapshot> _buildUnreadBroadcastsStream() {
+    return FirebaseFirestore.instance
+        .collection('broadcasts')
+        .where(
+          'sentAt',
+          isGreaterThan: Timestamp.fromMillisecondsSinceEpoch(_lastSeenMillis),
+        )
+        .snapshots();
+  }
+
   String get _groupLabel {
     switch (widget.group) {
       case 'beginners':
@@ -644,12 +729,21 @@ class _GroupScreenState extends State<GroupScreen> {
   @override
   void initState() {
     super.initState();
+    _membersStream = FirebaseFirestore.instance
+        .collection('users')
+        .where('group', isEqualTo: widget.group)
+        .snapshots();
     _loadLastSeen();
   }
 
   Future<void> _loadLastSeen() async {
     final millis = await _loadLastNotifSeenMillis();
-    if (mounted) setState(() => _lastSeenMillis = millis);
+    if (mounted) {
+      setState(() {
+        _lastSeenMillis = millis;
+        _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+      });
+    }
   }
 
   // Notifications are only ever revealed by tapping this bell — nothing
@@ -657,11 +751,16 @@ class _GroupScreenState extends State<GroupScreen> {
   Future<void> _openNotifications() async {
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => const BroadcastsScreen()),
+      slideRoute(const BroadcastsScreen()),
     );
     final now = DateTime.now().millisecondsSinceEpoch;
     await _saveLastNotifSeenMillis(now);
-    if (mounted) setState(() => _lastSeenMillis = now);
+    if (mounted) {
+      setState(() {
+        _lastSeenMillis = now;
+        _unreadBroadcastsStream = _buildUnreadBroadcastsStream();
+      });
+    }
   }
 
   /// Shows a picker of the other student groups, then moves [studentId]
@@ -726,7 +825,7 @@ class _GroupScreenState extends State<GroupScreen> {
   Future<void> _openSendNotification() async {
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => const SendNotificationScreen()),
+      slideRoute(const SendNotificationScreen()),
     );
   }
 
@@ -739,20 +838,14 @@ class _GroupScreenState extends State<GroupScreen> {
     if (!context.mounted) return;
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (context) => const LoginScreen()),
+      slideRoute(const LoginScreen()),
       (route) => false,
     );
   }
 
   Widget _notifBell() {
     return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('broadcasts')
-          .where(
-            'sentAt',
-            isGreaterThan: Timestamp.fromMillisecondsSinceEpoch(_lastSeenMillis),
-          )
-          .snapshots(),
+      stream: _unreadBroadcastsStream,
       builder: (context, snapshot) {
         final unread = _countUnread(snapshot, _currentUserId);
         return Stack(
@@ -796,24 +889,8 @@ class _GroupScreenState extends State<GroupScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        elevation: 0,
-        iconTheme: IconThemeData(color: Colors.white),
-        title: Row(
-          children: [
-            Image.asset('assets/images/logo.png', width: 30),
-            SizedBox(width: 10),
-            Text(
-              _groupLabel,
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 18,
-              ),
-            ),
-          ],
-        ),
+      appBar: buildAppBar(
+        title: _groupLabel,
         actions: [
           if (_isStaff)
             IconButton(
@@ -830,10 +907,7 @@ class _GroupScreenState extends State<GroupScreen> {
         ],
       ),
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('users')
-            .where('group', isEqualTo: widget.group)
-            .snapshots(),
+        stream: _membersStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(
@@ -877,32 +951,28 @@ class _GroupScreenState extends State<GroupScreen> {
             );
           }
 
-          return ListView.separated(
-            padding: EdgeInsets.symmetric(vertical: 8),
+          return ListView.builder(
+            padding: EdgeInsets.fromLTRB(12, 12, 12, 12),
             itemCount: members.length,
-            separatorBuilder: (context, index) =>
-                Divider(color: AppColors.fieldBorder, height: 1, indent: 76),
             itemBuilder: (context, index) {
               final data = members[index].data() as Map<String, dynamic>;
               final name = data['name'] ?? 'Unknown';
               final memberRole = data['role'] ?? '';
               final isSelf = members[index].id == _currentUserId;
 
-              return ListTile(
+              final tile = ListTile(
                 contentPadding:
-                    EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 leading: GestureDetector(
                   onTap: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(
-                        builder: (context) => isSelf
-                            ? ProfileScreen()
-                            : UserProfileViewScreen(
-                                userId: members[index].id,
-                                fallbackName: name,
-                              ),
-                      ),
+                      slideRoute(isSelf
+                          ? ProfileScreen()
+                          : UserProfileViewScreen(
+                              userId: members[index].id,
+                              fallbackName: name,
+                            )),
                     );
                   },
                   child: buildUserAvatar(userData: data, fallbackName: name),
@@ -925,6 +995,19 @@ class _GroupScreenState extends State<GroupScreen> {
                             currentUserId: _currentUserId,
                             otherUserId: members[index].id,
                           ),
+                          if (_isStaff)
+                            IconButton(
+                              icon: Icon(Icons.manage_accounts_outlined,
+                                  color: AppColors.primary),
+                              tooltip: 'View & edit account',
+                              onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  slideRoute(
+                                      UserRecordScreen(uid: members[index].id)),
+                                );
+                              },
+                            ),
                           if (_isStaff && memberRole != 'staff')
                             IconButton(
                               icon: Icon(Icons.swap_horiz,
@@ -942,20 +1025,44 @@ class _GroupScreenState extends State<GroupScreen> {
                     ? () {
                         Navigator.push(
                           context,
-                          MaterialPageRoute(builder: (context) => ProfileScreen()),
+                          slideRoute(ProfileScreen()),
                         );
                       }
                     : () {
                         Navigator.push(
                           context,
-                          MaterialPageRoute(
-                            builder: (context) => ChatScreen(
-                              otherUserId: members[index].id,
-                              otherUserName: name,
-                            ),
-                          ),
+                          slideRoute(ChatScreen(
+                            otherUserId: members[index].id,
+                            otherUserName: name,
+                          )),
                         );
                       },
+              );
+
+              return TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: Duration(milliseconds: 320 + (index * 30).clamp(0, 300)),
+                curve: Curves.easeOutCubic,
+                builder: (context, value, child) => Opacity(
+                  opacity: value,
+                  child: Transform.translate(
+                    offset: Offset(0, (1 - value) * 12),
+                    child: child,
+                  ),
+                ),
+                child: Container(
+                  margin: EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    boxShadow: appCardShadow(),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: tile,
+                  ),
+                ),
               );
             },
           );
@@ -967,7 +1074,7 @@ class _GroupScreenState extends State<GroupScreen> {
 
 /// Small chat-bubble badge shown next to a group member's name if they've
 /// sent you messages you haven't opened yet — with a running unread count.
-class _MemberUnreadBadge extends StatelessWidget {
+class _MemberUnreadBadge extends StatefulWidget {
   final String currentUserId;
   final String otherUserId;
 
@@ -977,33 +1084,53 @@ class _MemberUnreadBadge extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final chatId = chatIdFor(currentUserId, otherUserId);
+  State<_MemberUnreadBadge> createState() => _MemberUnreadBadgeState();
+}
 
+class _MemberUnreadBadgeState extends State<_MemberUnreadBadge> {
+  // currentUserId/otherUserId are fixed for this badge's whole lifetime
+  // (each list tile always represents the same pair of people), so these
+  // only need to be built once — otherwise a parent rebuild (e.g. dark
+  // mode, or any other member's data changing) would tear down and
+  // reopen every visible badge's Firestore listeners at once.
+  late final Stream<DocumentSnapshot> _chatDocStream;
+  late final Stream<QuerySnapshot> _messagesStream;
+
+  @override
+  void initState() {
+    super.initState();
+    final chatId = chatIdFor(widget.currentUserId, widget.otherUserId);
+    _chatDocStream =
+        FirebaseFirestore.instance.collection('chats').doc(chatId).snapshots();
+    _messagesStream = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .orderBy('sentAt', descending: true)
+        .snapshots();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance.collection('chats').doc(chatId).snapshots(),
+      stream: _chatDocStream,
       builder: (context, chatSnapshot) {
         Timestamp? myReadAt;
         if (chatSnapshot.data != null && chatSnapshot.data!.exists) {
           final data = chatSnapshot.data!.data() as Map<String, dynamic>;
           final readMap = data['lastReadAt'] as Map<String, dynamic>?;
-          myReadAt = readMap?[currentUserId] as Timestamp?;
+          myReadAt = readMap?[widget.currentUserId] as Timestamp?;
         }
 
         return StreamBuilder<QuerySnapshot>(
           // Ordered by sentAt only — filtering by sender happens below in
           // Dart, so this never needs a composite index.
-          stream: FirebaseFirestore.instance
-              .collection('chats')
-              .doc(chatId)
-              .collection('messages')
-              .orderBy('sentAt', descending: true)
-              .snapshots(),
+          stream: _messagesStream,
           builder: (context, msgSnapshot) {
             final docs = msgSnapshot.data?.docs ?? [];
             final unread = docs.where((doc) {
               final data = doc.data() as Map<String, dynamic>;
-              if (data['senderId'] != otherUserId) return false;
+              if (data['senderId'] != widget.otherUserId) return false;
               final sentAt = data['sentAt'] as Timestamp?;
               if (sentAt == null) return false;
               if (myReadAt == null) return true;

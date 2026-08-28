@@ -53,6 +53,14 @@ class ThemeController {
 // rather than plain constants so every screen automatically follows
 // whichever mode ThemeController.instance.isDark is currently set to —
 // no need to thread a "isDark" flag through every widget.
+/// Lets any screen find out when the user navigates back to it (as opposed
+/// to when it's first created) — used by the Profile tab so it can refresh
+/// itself after you edit your profile from a *different* screen (e.g. via
+/// the staff group list) and then return, since IndexedStack normally keeps
+/// tabs alive forever and never rebuilds them on its own.
+final RouteObserver<PageRoute<dynamic>> appRouteObserver =
+    RouteObserver<PageRoute<dynamic>>();
+
 class AppColors {
   static bool get _dark => ThemeController.instance.isDark.value;
 
@@ -76,6 +84,130 @@ class AppColors {
 
   static Color get fieldBorder =>
       _dark ? const Color(0xFF32403F) : const Color(0xFFD8E2E2);
+
+  // Card surface — one step lighter than the page background so cards
+  // read as "raised" without needing a heavy shadow to prove it.
+  static Color get surface =>
+      _dark ? const Color(0xFF1A2627) : const Color(0xFFFFFFFF);
+
+  static Color get divider =>
+      _dark ? const Color(0xFF2A3738) : const Color(0xFFE7EEEE);
+
+  static LinearGradient get appBarGradient => LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [primary, const Color(0xFF224F5A)],
+      );
+}
+
+/// Consistent rounding used for cards, sheets and buttons app-wide so
+/// nothing looks like it wandered in from a different design.
+class AppRadius {
+  static const sm = 10.0;
+  static const md = 14.0;
+  static const lg = 20.0;
+}
+
+/// Soft, brand-tinted elevation used instead of Material's default grey
+/// shadow — keeps cards feeling like part of the same app rather than a
+/// generic list.
+List<BoxShadow> appCardShadow({double opacity = 0.06}) => [
+      BoxShadow(
+        color: AppColors.primary.withValues(alpha: opacity),
+        blurRadius: 18,
+        offset: const Offset(0, 6),
+      ),
+    ];
+
+/// Drop-in replacement for `AppBar` that gives every screen the same
+/// branded gradient + soft shadow instead of a flat color fill.
+PreferredSizeWidget buildAppBar({
+  required String title,
+  List<Widget>? actions,
+  Widget? leading,
+  bool centerTitle = false,
+}) {
+  return AppBar(
+    title: Text(title,
+        style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
+    centerTitle: centerTitle,
+    actions: actions,
+    leading: leading,
+    foregroundColor: Colors.white,
+    backgroundColor: Colors.transparent,
+    elevation: 0,
+    flexibleSpace: Container(
+      decoration: BoxDecoration(
+        gradient: AppColors.appBarGradient,
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.28),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// App-wide page transition — a gentle fade + slide-up, used everywhere
+/// instead of the platform default so navigating between screens feels
+/// intentional rather than abrupt.
+Route<T> slideRoute<T>(Widget page) {
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 320),
+    reverseTransitionDuration: const Duration(milliseconds: 260),
+    pageBuilder: (context, animation, secondaryAnimation) => page,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.04),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+/// Small press-scale wrapper — buttons and tappable cards shrink slightly
+/// on press for a tactile, "native app" feel instead of a flat tap.
+class Pressable extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius? borderRadius;
+
+  const Pressable({super.key, required this.child, this.onTap, this.borderRadius});
+
+  @override
+  State<Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<Pressable> {
+  double _scale = 1.0;
+
+  void _setScale(double s) => setState(() => _scale = s);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: widget.onTap == null ? null : (_) => _setScale(0.97),
+      onTapUp: widget.onTap == null ? null : (_) => _setScale(1.0),
+      onTapCancel: widget.onTap == null ? null : () => _setScale(1.0),
+      onTap: widget.onTap,
+      child: AnimatedScale(
+        scale: _scale,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        child: widget.child,
+      ),
+    );
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -89,6 +221,7 @@ class MyApp extends StatelessWidget {
         return MaterialApp(
           title: 'MSA_Chat',
           debugShowCheckedModeBanner: false,
+          navigatorObservers: [appRouteObserver],
           theme: ThemeData(
             scaffoldBackgroundColor: AppColors.background,
             colorScheme: ColorScheme.fromSeed(
@@ -204,7 +337,7 @@ class _SplashScreenState extends State<SplashScreen>
     if (user == null) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => const LoginScreen()),
+        slideRoute(const LoginScreen()),
       );
       return;
     }
@@ -212,7 +345,7 @@ class _SplashScreenState extends State<SplashScreen>
     // Already logged in — go straight to their group
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (context) => const GroupRouter()),
+      slideRoute(const GroupRouter()),
     );
   }
 

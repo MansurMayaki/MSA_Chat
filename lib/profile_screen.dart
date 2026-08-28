@@ -7,7 +7,16 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import 'app_notify.dart';
-import 'main.dart' show AppColors, ThemeController;
+import 'main.dart'
+    show
+        AppColors,
+        ThemeController,
+        AppRadius,
+        appCardShadow,
+        buildAppBar,
+        slideRoute,
+        appRouteObserver;
+import 'fix_account_link_screen.dart';
 
 /// Max size (in encoded base64 characters) we'll accept for a profile
 /// photo. Firestore documents cap out at 1MiB total, so this keeps a
@@ -65,19 +74,7 @@ class ProfileScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        elevation: 0,
-        iconTheme: IconThemeData(color: Colors.white),
-        title: Text(
-          'My Profile',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 18,
-          ),
-        ),
-      ),
+      appBar: buildAppBar(title: 'My Profile'),
       body: ProfileForm(),
     );
   }
@@ -94,7 +91,7 @@ class ProfileForm extends StatefulWidget {
   State<ProfileForm> createState() => _ProfileFormState();
 }
 
-class _ProfileFormState extends State<ProfileForm> {
+class _ProfileFormState extends State<ProfileForm> with RouteAware {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
@@ -114,28 +111,50 @@ class _ProfileFormState extends State<ProfileForm> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      appRouteObserver.subscribe(this, route);
+    }
+  }
+
+  @override
   void dispose() {
+    appRouteObserver.unsubscribe(this);
     _nameController.dispose();
     _phoneController.dispose();
     _bioController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadProfile() async {
+  // Fires when a screen pushed on top of this one (e.g. the profile view
+  // opened by tapping your own name in a group) is popped and this tab
+  // becomes visible again — the trigger for the "stale Profile tab" bug.
+  @override
+  void didPopNext() {
+    _loadProfile(silent: true);
+  }
+
+  Future<void> _loadProfile({bool silent = false}) async {
+    if (!silent) setState(() => _loading = true);
     try {
       final doc =
           await FirebaseFirestore.instance.collection('users').doc(_uid).get();
       final data = doc.data() ?? {};
-      _nameController.text = (data['name'] as String?) ?? '';
-      _phoneController.text = (data['phone'] as String?) ?? '';
-      _bioController.text = (data['bio'] as String?) ?? '';
-      _photoBase64 = data['photoBase64'] as String?;
-      _userData = data;
+      if (!mounted) return;
+      setState(() {
+        _nameController.text = (data['name'] as String?) ?? '';
+        _phoneController.text = (data['phone'] as String?) ?? '';
+        _bioController.text = (data['bio'] as String?) ?? '';
+        _photoBase64 = data['photoBase64'] as String?;
+        _userData = data;
+      });
     } catch (_) {
       // If this fails the form just starts blank — the user can still
       // fill it in and save, which will populate the doc going forward.
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && !silent) setState(() => _loading = false);
     }
   }
 
@@ -245,6 +264,7 @@ class _ProfileFormState extends State<ProfileForm> {
                         decoration: _decoration('Bio', Icons.info_outline),
                       ),
                       if (_userData != null) _readOnlyInfo(),
+                      if (_userData?['role'] == 'staff') _adminToolsSection(),
                       SizedBox(height: 16),
                       _darkModeToggle(),
                       SizedBox(height: 12),
@@ -338,9 +358,7 @@ class _ProfileFormState extends State<ProfileForm> {
     if (_photoBase64 == null || _photoBase64!.isEmpty) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (context) => _FullscreenProfilePhoto(bytes: base64Decode(_photoBase64!)),
-      ),
+      slideRoute(_FullscreenProfilePhoto(bytes: base64Decode(_photoBase64!))),
     );
   }
 
@@ -368,6 +386,68 @@ class _ProfileFormState extends State<ProfileForm> {
             _infoRow('Role', role == 'staff' ? 'Staff' : 'Student'),
             _infoRow('Group', group),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _adminToolsSection() {
+    return Padding(
+      padding: EdgeInsets.only(top: 14),
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          boxShadow: appCardShadow(),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              Navigator.push(
+                context,
+                slideRoute(const FixAccountLinkScreen()),
+              );
+            },
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+              child: Row(
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.link, color: AppColors.primary, size: 20),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Fix Account Link',
+                          style: TextStyle(
+                            color: AppColors.primaryDark,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          'Check or repair someone\'s ID login link',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.chevron_right, color: Colors.grey),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -459,7 +539,7 @@ class _ProfileFormState extends State<ProfileForm> {
 /// Read-only view of another user's profile — reachable by tapping their
 /// avatar in a group member list or chat list. Shows the same info as
 /// [ProfileForm] but with no editable fields and no camera/save controls.
-class UserProfileViewScreen extends StatelessWidget {
+class UserProfileViewScreen extends StatefulWidget {
   final String userId;
   final String fallbackName;
 
@@ -470,24 +550,31 @@ class UserProfileViewScreen extends StatelessWidget {
   });
 
   @override
+  State<UserProfileViewScreen> createState() => _UserProfileViewScreenState();
+}
+
+class _UserProfileViewScreenState extends State<UserProfileViewScreen> {
+  // userId is fixed for this screen's whole lifetime, so this only needs
+  // to be built once — an inline stream in build() would otherwise be
+  // torn down and reopened on every rebuild, e.g. every dark-mode toggle.
+  late final Stream<DocumentSnapshot> _userDocStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _userDocStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(widget.userId)
+        .snapshots();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        elevation: 0,
-        iconTheme: IconThemeData(color: Colors.white),
-        title: Text(
-          'Profile',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 18,
-          ),
-        ),
-      ),
+      appBar: buildAppBar(title: 'Profile'),
       body: StreamBuilder<DocumentSnapshot>(
-        stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
+        stream: _userDocStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(
@@ -495,13 +582,49 @@ class UserProfileViewScreen extends StatelessWidget {
             );
           }
 
+          if (snapshot.hasError) {
+            // Most likely cause: Firestore security rules are blocking this
+            // read (e.g. rules only allow reading your own user doc, or
+            // only members of the same group). Surface that clearly instead
+            // of silently falling back to blank fields, which looked like
+            // "the ID/level just isn't showing" with no explanation.
+            return Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.lock_outline, color: Colors.grey, size: 40),
+                    SizedBox(height: 12),
+                    Text(
+                      'Could not load this profile',
+                      style: TextStyle(
+                        color: AppColors.primaryDark,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'This is usually a Firestore permissions issue — ask an '
+                      'admin to check that the "users" collection can be read '
+                      'across groups, not just within the same one.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
           final data = snapshot.data?.data() as Map<String, dynamic>? ?? {};
-          final name = (data['name'] as String?) ?? fallbackName;
+          final name = (data['name'] as String?) ?? widget.fallbackName;
           final photoBase64 = data['photoBase64'] as String?;
           final bio = (data['bio'] as String?) ?? '';
           final phone = (data['phone'] as String?) ?? '';
           final role = (data['role'] as String?) ?? '';
           final group = (data['group'] as String?) ?? '';
+          final idNumber = (data['id_number'] as String?) ?? '';
           final hasPhoto = photoBase64 != null && photoBase64.isNotEmpty;
 
           return SingleChildScrollView(
@@ -515,11 +638,9 @@ class UserProfileViewScreen extends StatelessWidget {
                       onTap: hasPhoto
                           ? () => Navigator.push(
                                 context,
-                                MaterialPageRoute(
-                                  builder: (context) => _FullscreenProfilePhoto(
-                                    bytes: base64Decode(photoBase64),
-                                  ),
-                                ),
+                                slideRoute(_FullscreenProfilePhoto(
+                                  bytes: base64Decode(photoBase64),
+                                )),
                               )
                           : null,
                       child: buildUserAvatar(
@@ -570,6 +691,7 @@ class UserProfileViewScreen extends StatelessWidget {
                             SizedBox(height: 14),
                           ],
                           _viewInfoRow('Phone', phone.isEmpty ? 'Not set' : phone),
+                          _viewInfoRow('ID Number', idNumber.isEmpty ? 'Not set' : idNumber),
                           _viewInfoRow('Group', group),
                         ],
                       ),

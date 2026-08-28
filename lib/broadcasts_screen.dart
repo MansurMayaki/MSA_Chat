@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, AppRadius, appCardShadow, buildAppBar, slideRoute;
 
 String _formatTimestamp(Timestamp? ts) {
   if (ts == null) return '';
@@ -25,11 +25,7 @@ class BroadcastsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-        title: Text('Notifications'),
-      ),
+      appBar: buildAppBar(title: 'Notifications'),
       body: AnnouncementsTab(),
     );
   }
@@ -39,16 +35,27 @@ class BroadcastsScreen extends StatelessWidget {
 /// what actually renders inside the Announcements bottom-nav tab in
 /// MainScreen. [BroadcastsScreen] above just wraps this for the older
 /// entry point (the notification bell inside a group screen).
-class AnnouncementsTab extends StatelessWidget {
+class AnnouncementsTab extends StatefulWidget {
   const AnnouncementsTab({super.key});
+
+  @override
+  State<AnnouncementsTab> createState() => _AnnouncementsTabState();
+}
+
+class _AnnouncementsTabState extends State<AnnouncementsTab> {
+  // Built once instead of inline in build() — an inline stream here would
+  // be recreated (and its Firestore listener torn down and reopened) on
+  // every rebuild, including every dark-mode toggle.
+  late final Stream<QuerySnapshot> _broadcastsStream = FirebaseFirestore
+      .instance
+      .collection('broadcasts')
+      .orderBy('sentAt', descending: true)
+      .snapshots();
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('broadcasts')
-            .orderBy('sentAt', descending: true)
-            .snapshots(),
+        stream: _broadcastsStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(
@@ -109,20 +116,18 @@ class AnnouncementsTab extends StatelessWidget {
             countBySender[senderId] = (countBySender[senderId] ?? 0) + 1;
           }
 
-          return ListView.separated(
-            padding: EdgeInsets.symmetric(vertical: 8),
+          return ListView.builder(
+            padding: EdgeInsets.fromLTRB(12, 12, 12, 12),
             itemCount: senderOrder.length,
-            separatorBuilder: (context, index) =>
-                Divider(color: AppColors.fieldBorder, height: 1, indent: 76),
             itemBuilder: (context, index) {
               final senderId = senderOrder[index];
               final senderName = nameBySender[senderId] ?? 'Staff';
               final count = countBySender[senderId] ?? 0;
               final latest = latestBySender[senderId];
 
-              return ListTile(
+              final tile = ListTile(
                 contentPadding:
-                    EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 leading: CircleAvatar(
                   radius: 26,
                   backgroundColor: AppColors.accent.withValues(alpha: 0.18),
@@ -145,14 +150,38 @@ class AnnouncementsTab extends StatelessWidget {
                 onTap: () {
                   Navigator.push(
                     context,
-                    MaterialPageRoute(
-                      builder: (context) => SenderMessagesScreen(
-                        senderId: senderId,
-                        senderName: senderName,
-                      ),
-                    ),
+                    slideRoute(SenderMessagesScreen(
+                      senderId: senderId,
+                      senderName: senderName,
+                    )),
                   );
                 },
+              );
+
+              return TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: Duration(milliseconds: 320 + (index * 30).clamp(0, 300)),
+                curve: Curves.easeOutCubic,
+                builder: (context, value, child) => Opacity(
+                  opacity: value,
+                  child: Transform.translate(
+                    offset: Offset(0, (1 - value) * 12),
+                    child: child,
+                  ),
+                ),
+                child: Container(
+                  margin: EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    boxShadow: appCardShadow(),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: tile,
+                  ),
+                ),
               );
             },
           );
@@ -163,7 +192,7 @@ class AnnouncementsTab extends StatelessWidget {
 
 /// Second screen: all the notifications sent by one particular sender,
 /// opened after tapping their name in the list above.
-class SenderMessagesScreen extends StatelessWidget {
+class SenderMessagesScreen extends StatefulWidget {
   final String senderId;
   final String senderName;
 
@@ -174,21 +203,28 @@ class SenderMessagesScreen extends StatelessWidget {
   });
 
   @override
+  State<SenderMessagesScreen> createState() => _SenderMessagesScreenState();
+}
+
+class _SenderMessagesScreenState extends State<SenderMessagesScreen> {
+  // Built once instead of inline in build() — the query itself doesn't
+  // depend on senderId (filtering by sender happens client-side below),
+  // so it never needs to change for the life of this screen.
+  late final Stream<QuerySnapshot> _broadcastsStream = FirebaseFirestore
+      .instance
+      .collection('broadcasts')
+      .orderBy('sentAt', descending: true)
+      .snapshots();
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-        title: Text(senderName),
-      ),
+      appBar: buildAppBar(title: widget.senderName),
       body: StreamBuilder<QuerySnapshot>(
         // Ordered by sentAt only (single field) — filtering by sender
         // happens below, in Dart, so this never needs a composite index.
-        stream: FirebaseFirestore.instance
-            .collection('broadcasts')
-            .orderBy('sentAt', descending: true)
-            .snapshots(),
+        stream: _broadcastsStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(
@@ -208,7 +244,7 @@ class SenderMessagesScreen extends StatelessWidget {
 
           final docs = (snapshot.data?.docs ?? []).where((doc) {
             final data = doc.data() as Map<String, dynamic>;
-            return data['senderId'] == senderId;
+            return data['senderId'] == widget.senderId;
           }).toList();
 
           if (docs.isEmpty) {
@@ -233,9 +269,9 @@ class SenderMessagesScreen extends StatelessWidget {
                 width: double.infinity,
                 padding: EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: AppColors.fieldFill,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.fieldBorder),
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  boxShadow: appCardShadow(),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,

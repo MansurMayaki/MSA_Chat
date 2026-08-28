@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'main.dart' show AppColors, ThemeController;
+import 'main.dart' show AppColors, ThemeController, slideRoute, Pressable;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 import 'register_screen.dart';
@@ -114,10 +114,31 @@ class _LoginScreenState extends State<LoginScreen>
 
       final email = indexDoc.data()!['email'] as String;
 
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
+      final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: email,
         password: _passwordController.text.trim(),
       );
+
+      // Safety net: the ID→email lookup above trusts whatever is stored in
+      // id_index. If that document was ever created/edited with the wrong
+      // email (bad data, not something this app does on its own), sign-in
+      // would silently succeed into a DIFFERENT person's account. Catch
+      // that here by checking the signed-in account's own id_number
+      // actually matches the ID that was typed, instead of letting anyone
+      // land in someone else's account without any warning.
+      final uid = credential.user!.uid;
+      final userDoc =
+          await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final actualIdNumber = (userDoc.data()?['id_number'] as String?) ?? '';
+      if (sanitizeIdForDoc(actualIdNumber) != docId) {
+        await FirebaseAuth.instance.signOut();
+        throw FirebaseAuthException(
+          code: 'id-mismatch',
+          message:
+              'This ID number is linked to the wrong account in our records. '
+              'Please contact an admin to fix it — do not re-enter your password.',
+        );
+      }
 
       // Remember this ID so next time only the password is needed.
       await _rememberId(_idController.text.trim().toUpperCase());
@@ -128,7 +149,7 @@ class _LoginScreenState extends State<LoginScreen>
       if (!mounted) return;
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(builder: (context) => const GroupRouter()),
+        slideRoute(const GroupRouter()),
         (route) => false,
       );
     } on FirebaseAuthException catch (e) {
@@ -451,10 +472,7 @@ class _LoginScreenState extends State<LoginScreen>
                                   onPressed: () {
                                     Navigator.pushReplacement(
                                       context,
-                                      MaterialPageRoute(
-                                        builder: (context) =>
-                                            RegisterScreen(),
-                                      ),
+                                      slideRoute(RegisterScreen()),
                                     );
                                   },
                                   style: TextButton.styleFrom(

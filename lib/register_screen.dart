@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'main.dart' show AppColors, ThemeController;
+import 'main.dart' show AppColors, ThemeController, slideRoute;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 import 'login_screen.dart';
@@ -174,7 +174,7 @@ class _RegisterScreenState extends State<RegisterScreen>
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => const LoginScreen()),
+        slideRoute(const LoginScreen()),
       );
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
@@ -502,10 +502,7 @@ class _RegisterScreenState extends State<RegisterScreen>
                                   onPressed: () {
                                     Navigator.pushReplacement(
                                       context,
-                                      MaterialPageRoute(
-                                        builder: (context) =>
-                                            LoginScreen(),
-                                      ),
+                                      slideRoute(LoginScreen()),
                                     );
                                   },
                                   style: TextButton.styleFrom(

@@ -1,14 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, AppRadius, appCardShadow, buildAppBar, slideRoute;
 import 'chat_screen.dart';
 import 'profile_screen.dart' show buildUserAvatar, UserProfileViewScreen;
 
-class ChatsListScreen extends StatelessWidget {
+class ChatsListScreen extends StatefulWidget {
   const ChatsListScreen({super.key});
 
+  @override
+  State<ChatsListScreen> createState() => _ChatsListScreenState();
+}
+
+class _ChatsListScreenState extends State<ChatsListScreen> {
   String get _currentUserId => FirebaseAuth.instance.currentUser?.uid ?? '';
+
+  // Built once per screen instance instead of inline in build() — a
+  // StreamBuilder treats a new Stream object as "different" even when the
+  // query is identical, so an inline stream here would cancel and reopen
+  // this Firestore listener on every rebuild (e.g. every dark-mode toggle).
+  late final Stream<QuerySnapshot> _myChatsStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _myChatsStream = FirebaseFirestore.instance
+        .collection('chats')
+        .where('participants', arrayContains: _currentUserId)
+        .snapshots();
+  }
 
   String _formatTimestamp(Timestamp? ts) {
     if (ts == null) return '';
@@ -27,19 +47,12 @@ class ChatsListScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-        title: Text('Chats'),
-      ),
+      appBar: buildAppBar(title: 'Chats'),
       // No orderBy here on purpose — combining array-contains with orderBy
       // on a different field needs a composite index. Sorting the small
       // result set in Dart avoids that entirely.
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('chats')
-            .where('participants', arrayContains: _currentUserId)
-            .snapshots(),
+        stream: _myChatsStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(
@@ -99,11 +112,9 @@ class ChatsListScreen extends StatelessWidget {
             );
           }
 
-          return ListView.separated(
-            padding: EdgeInsets.symmetric(vertical: 8),
+          return ListView.builder(
+            padding: EdgeInsets.fromLTRB(12, 12, 12, 12),
             itemCount: docs.length,
-            separatorBuilder: (context, index) =>
-                Divider(color: AppColors.fieldBorder, height: 1, indent: 76),
             itemBuilder: (context, index) {
               final data = docs[index].data() as Map<String, dynamic>;
               final participants = List<String>.from(data['participants'] ?? []);
@@ -125,38 +136,25 @@ class ChatsListScreen extends StatelessWidget {
                   lastMessageAt != null &&
                   (myReadAt == null || myReadAt.compareTo(lastMessageAt) < 0);
 
-              return ListTile(
+              final tile = ListTile(
                 contentPadding:
-                    EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 leading: GestureDetector(
                   onTap: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(
-                        builder: (context) => UserProfileViewScreen(
-                          userId: otherUserId,
-                          fallbackName: otherUserName,
-                        ),
-                      ),
+                      slideRoute(UserProfileViewScreen(
+                        userId: otherUserId,
+                        fallbackName: otherUserName,
+                      )),
                     );
                   },
                   // Chat docs only store the other person's name, not their
                   // photo, so their live user doc is streamed here to keep
                   // the DP in sync with whatever they've set in Profile.
-                  child: StreamBuilder<DocumentSnapshot>(
-                    stream: FirebaseFirestore.instance
-                        .collection('users')
-                        .doc(otherUserId)
-                        .snapshots(),
-                    builder: (context, userSnapshot) {
-                      final userData =
-                          userSnapshot.data?.data() as Map<String, dynamic>?;
-                      return buildUserAvatar(
-                        userData: userData,
-                        fallbackName: otherUserName,
-                        radius: 26,
-                      );
-                    },
+                  child: _ChatAvatarStream(
+                    otherUserId: otherUserId,
+                    fallbackName: otherUserName,
                   ),
                 ),
                 title: Text(
@@ -203,19 +201,89 @@ class ChatsListScreen extends StatelessWidget {
                 onTap: () {
                   Navigator.push(
                     context,
-                    MaterialPageRoute(
-                      builder: (context) => ChatScreen(
-                        otherUserId: otherUserId,
-                        otherUserName: otherUserName,
-                      ),
-                    ),
+                    slideRoute(ChatScreen(
+                      otherUserId: otherUserId,
+                      otherUserName: otherUserName,
+                    )),
                   );
                 },
+              );
+
+              return TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: Duration(milliseconds: 320 + (index * 30).clamp(0, 300)),
+                curve: Curves.easeOutCubic,
+                builder: (context, value, child) => Opacity(
+                  opacity: value,
+                  child: Transform.translate(
+                    offset: Offset(0, (1 - value) * 12),
+                    child: child,
+                  ),
+                ),
+                child: Container(
+                  margin: EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    boxShadow: appCardShadow(),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: tile,
+                  ),
+                ),
               );
             },
           );
         },
       ),
+    );
+  }
+}
+
+/// A chat list tile's avatar, kept live-synced to the other person's user
+/// doc (for their current photo). Split out into its own StatefulWidget so
+/// its Firestore listener can be cached per-tile — otherwise every tile's
+/// avatar stream would be rebuilt (and its listener reopened) whenever the
+/// list rebuilds for any reason, not just when that person's photo changes.
+class _ChatAvatarStream extends StatefulWidget {
+  final String otherUserId;
+  final String fallbackName;
+
+  const _ChatAvatarStream({
+    required this.otherUserId,
+    required this.fallbackName,
+  });
+
+  @override
+  State<_ChatAvatarStream> createState() => _ChatAvatarStreamState();
+}
+
+class _ChatAvatarStreamState extends State<_ChatAvatarStream> {
+  late final Stream<DocumentSnapshot> _userDocStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _userDocStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(widget.otherUserId)
+        .snapshots();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot>(
+      stream: _userDocStream,
+      builder: (context, userSnapshot) {
+        final userData = userSnapshot.data?.data() as Map<String, dynamic>?;
+        return buildUserAvatar(
+          userData: userData,
+          fallbackName: widget.fallbackName,
+          radius: 26,
+        );
+      },
     );
   }
 }
