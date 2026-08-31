@@ -5,7 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
-import 'main.dart' show AppColors;
+import 'main.dart' show AppColors, AppRadius, appCardShadow, buildAppBar, slideRoute, Pressable;
 import 'virtual_keyboard.dart';
 import 'app_notify.dart';
 import 'profile_screen.dart' show UserProfileViewScreen;
@@ -32,9 +32,15 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// Small palette offered whenever the user reacts to a message — kept
+/// short and on-brand rather than a full emoji keyboard, since a handful
+/// of quick reactions covers almost every real use case in a chat.
+const List<String> kQuickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
 class _ChatScreenState extends State<ChatScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+  final _searchController = TextEditingController();
   bool _showKeyboard = false;
   bool _isSending = false;
   bool _isUploadingImage = false;
@@ -43,14 +49,39 @@ class _ChatScreenState extends State<ChatScreen> {
   int _markedReadForDocCount = -1;
   Timer? _typingTimer;
   bool _typingFlagSet = false;
+  bool _isSearching = false;
+  String _searchQuery = '';
+  String? _editingMessageId;
 
   String get _currentUserId => FirebaseAuth.instance.currentUser?.uid ?? '';
 
   String get _chatId => chatIdFor(_currentUserId, widget.otherUserId);
 
+  // Created once per screen instance instead of inline in build(). A
+  // StreamBuilder treats a new Stream object as "different" even when the
+  // underlying query is identical, so building these inline would cancel
+  // and reopen every Firestore listener on this screen on every rebuild
+  // (e.g. every time dark mode is toggled, or setState runs for any
+  // reason) — visible as a flash back to a loading state.
+  late final Stream<DocumentSnapshot> _chatDocStream;
+  late final Stream<DocumentSnapshot> _otherUserDocStream;
+  late final Stream<QuerySnapshot> _messagesStream;
+
   @override
   void initState() {
     super.initState();
+    _chatDocStream =
+        FirebaseFirestore.instance.collection('chats').doc(_chatId).snapshots();
+    _otherUserDocStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(widget.otherUserId)
+        .snapshots();
+    _messagesStream = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .collection('messages')
+        .orderBy('sentAt', descending: true)
+        .snapshots();
     _markAsRead();
     _messageController.addListener(_onMessageChanged);
   }
@@ -196,6 +227,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendMessage() async {
+    if (_editingMessageId != null) {
+      await _saveEdit();
+      return;
+    }
+
     final text = _messageController.text.trim();
     if (text.isEmpty || _isSending) return;
 
@@ -278,6 +314,8 @@ class _ChatScreenState extends State<ChatScreen> {
     required bool isMine,
     required String text,
     required String senderName,
+    required bool isImage,
+    required bool isPinned,
   }) {
     showModalBottomSheet(
       context: context,
@@ -291,6 +329,14 @@ class _ChatScreenState extends State<ChatScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               ListTile(
+                leading: Text('😊', style: TextStyle(fontSize: 20)),
+                title: Text('React'),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _showReactionPicker(messageId);
+                },
+              ),
+              ListTile(
                 leading: Icon(Icons.reply, color: AppColors.primary),
                 title: Text('Reply'),
                 onTap: () {
@@ -301,6 +347,26 @@ class _ChatScreenState extends State<ChatScreen> {
                   });
                 },
               ),
+              ListTile(
+                leading: Icon(
+                  isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+                  color: AppColors.primary,
+                ),
+                title: Text(isPinned ? 'Unpin' : 'Pin'),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _togglePinned(messageId: messageId, text: text, senderName: senderName);
+                },
+              ),
+              if (isMine && !isImage)
+                ListTile(
+                  leading: Icon(Icons.edit_outlined, color: AppColors.primary),
+                  title: Text('Edit'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _startEditing(messageId, text);
+                  },
+                ),
               if (isMine)
                 ListTile(
                   leading: Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -360,7 +426,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // the more useful thing to show.
   Widget _statusSubtitle() {
     return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance.collection('chats').doc(_chatId).snapshots(),
+      stream: _chatDocStream,
       builder: (context, chatSnapshot) {
         bool otherIsTyping = false;
         if (chatSnapshot.data != null && chatSnapshot.data!.exists) {
@@ -377,10 +443,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
 
         return StreamBuilder<DocumentSnapshot>(
-          stream: FirebaseFirestore.instance
-              .collection('users')
-              .doc(widget.otherUserId)
-              .snapshots(),
+          stream: _otherUserDocStream,
           builder: (context, userSnapshot) {
             if (userSnapshot.data == null || !userSnapshot.data!.exists) {
               return SizedBox.shrink();
@@ -413,7 +476,148 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_typingFlagSet) _setTyping(false);
     _messageController.dispose();
     _scrollController.dispose();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _isSearching = !_isSearching;
+      if (!_isSearching) {
+        _searchQuery = '';
+        _searchController.clear();
+        FocusScope.of(context).unfocus();
+      }
+    });
+  }
+
+  /// Toggles my own reaction on a message. Tapping the same emoji again
+  /// removes it; tapping a different one swaps it — matches how reactions
+  /// behave in every mainstream chat app.
+  Future<void> _toggleReaction(String messageId, String emoji) async {
+    final ref = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .collection('messages')
+        .doc(messageId);
+    try {
+      final snap = await ref.get();
+      final reactions =
+          (snap.data()?['reactions'] as Map<String, dynamic>?) ?? {};
+      final current = reactions[_currentUserId] as String?;
+      if (current == emoji) {
+        await ref.update({'reactions.$_currentUserId': FieldValue.delete()});
+      } else {
+        await ref.update({'reactions.$_currentUserId': emoji});
+      }
+    } catch (_) {
+      // Not critical — the reaction just won't stick this time.
+    }
+  }
+
+  void _showReactionPicker(String messageId) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Container(
+            margin: EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(28),
+              boxShadow: appCardShadow(opacity: 0.16),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: kQuickReactions
+                  .map((emoji) => Pressable(
+                        onTap: () {
+                          Navigator.pop(sheetContext);
+                          _toggleReaction(messageId, emoji);
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Text(emoji, style: TextStyle(fontSize: 26)),
+                        ),
+                      ))
+                  .toList(),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _startEditing(String messageId, String currentText) {
+    setState(() {
+      _editingMessageId = messageId;
+      _replyingToText = null;
+      _replyingToSenderName = null;
+      _messageController.text = currentText;
+      _messageController.selection = TextSelection.collapsed(offset: currentText.length);
+    });
+    _showKeyboardNow();
+  }
+
+  void _cancelEditing() {
+    setState(() {
+      _editingMessageId = null;
+      _messageController.clear();
+    });
+  }
+
+  Future<void> _saveEdit() async {
+    final messageId = _editingMessageId;
+    final text = _messageController.text.trim();
+    if (messageId == null || text.isEmpty) return;
+
+    setState(() => _editingMessageId = null);
+    _messageController.clear();
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .doc(messageId)
+          .update({'text': text, 'edited': true});
+    } catch (_) {
+      if (mounted) {
+        showAppNotification(context, message: 'Could not save edit.', isError: true);
+      }
+    }
+  }
+
+  /// Pins/unpins a message as the chat's single pinned message — stored on
+  /// the parent chat doc so it's cheap to read (no extra query) and shows
+  /// up for both participants immediately.
+  Future<void> _togglePinned({
+    required String messageId,
+    required String text,
+    required String senderName,
+  }) async {
+    final chatRef = FirebaseFirestore.instance.collection('chats').doc(_chatId);
+    try {
+      final snap = await chatRef.get();
+      final currentPinned = snap.data()?['pinnedMessage'] as Map<String, dynamic>?;
+      if (currentPinned != null && currentPinned['id'] == messageId) {
+        await chatRef.update({'pinnedMessage': FieldValue.delete()});
+      } else {
+        await chatRef.set({
+          'pinnedMessage': {
+            'id': messageId,
+            'text': text,
+            'senderName': senderName,
+          },
+        }, SetOptions(merge: true));
+      }
+    } catch (_) {
+      if (mounted) {
+        showAppNotification(context, message: 'Could not update pin.', isError: true);
+      }
+    }
   }
 
   @override
@@ -421,30 +625,38 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            gradient: AppColors.appBarGradient,
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.primary.withValues(alpha: 0.28),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+        ),
         title: Row(
           children: [
             GestureDetector(
               onTap: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (context) => UserProfileViewScreen(
-                      userId: widget.otherUserId,
-                      fallbackName: widget.otherUserName,
-                    ),
-                  ),
+                  slideRoute(UserProfileViewScreen(
+                    userId: widget.otherUserId,
+                    fallbackName: widget.otherUserName,
+                  )),
                 );
               },
               // The chat only knows the other user's name/id from
               // navigation — their photo is streamed live from their user
               // doc so this always shows their actual current DP.
               child: StreamBuilder<DocumentSnapshot>(
-                stream: FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(widget.otherUserId)
-                    .snapshots(),
+                stream: _otherUserDocStream,
                 builder: (context, userSnapshot) {
                   final userData = userSnapshot.data?.data() as Map<String, dynamic>?;
                   final photoBase64 = userData?['photoBase64'] as String?;
@@ -489,35 +701,122 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.photo_library_outlined),
+            tooltip: 'Shared photos',
+            onPressed: () {
+              Navigator.push(
+                context,
+                slideRoute(_ChatMediaGalleryScreen(chatId: _chatId)),
+              );
+            },
+          ),
+          IconButton(
+            icon: Icon(_isSearching ? Icons.close : Icons.search),
+            tooltip: _isSearching ? 'Close search' : 'Search messages',
+            onPressed: _toggleSearch,
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
           children: [
+            if (_isSearching)
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                color: AppColors.fieldFill,
+                child: TextField(
+                  controller: _searchController,
+                  autofocus: true,
+                  style: TextStyle(color: AppColors.primaryDark),
+                  decoration: InputDecoration(
+                    hintText: 'Search in this chat...',
+                    prefixIcon: Icon(Icons.search, color: AppColors.primary, size: 20),
+                    isDense: true,
+                    filled: true,
+                    fillColor: AppColors.background,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      borderSide: BorderSide(color: AppColors.fieldBorder),
+                    ),
+                  ),
+                  onChanged: (v) => setState(() => _searchQuery = v.trim().toLowerCase()),
+                ),
+              ),
+            StreamBuilder<DocumentSnapshot>(
+              stream: _chatDocStream,
+              builder: (context, chatSnapshot) {
+                if (chatSnapshot.data == null || !chatSnapshot.data!.exists) {
+                  return SizedBox.shrink();
+                }
+                final chatData = chatSnapshot.data!.data() as Map<String, dynamic>;
+                final pinned = chatData['pinnedMessage'] as Map<String, dynamic>?;
+                if (pinned == null) return SizedBox.shrink();
+                return Pressable(
+                  onTap: () => _togglePinned(
+                    messageId: pinned['id'] as String? ?? '',
+                    text: pinned['text'] as String? ?? '',
+                    senderName: pinned['senderName'] as String? ?? '',
+                  ),
+                  child: Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    color: AppColors.primary.withValues(alpha: 0.08),
+                    child: Row(
+                      children: [
+                        Icon(Icons.push_pin, size: 16, color: AppColors.primary),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: RichText(
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            text: TextSpan(
+                              children: [
+                                TextSpan(
+                                  text: '${pinned['senderName'] ?? ''}: ',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.primary,
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: pinned['text'] as String? ?? '',
+                                  style: TextStyle(fontSize: 12, color: AppColors.primaryDark),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Icon(Icons.close, size: 16, color: Colors.grey),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
             Expanded(
               child: GestureDetector(
                 onTap: _hideKeyboard,
                 behavior: HitTestBehavior.opaque,
                 child: StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('chats')
-                      .doc(_chatId)
-                      .snapshots(),
+                  stream: _chatDocStream,
                   builder: (context, chatSnapshot) {
                     Timestamp? otherUserReadAt;
+                    String? pinnedMessageId;
                     if (chatSnapshot.data != null && chatSnapshot.data!.exists) {
                       final chatData =
                           chatSnapshot.data!.data() as Map<String, dynamic>;
                       final readMap = chatData['lastReadAt'] as Map<String, dynamic>?;
                       otherUserReadAt = readMap?[widget.otherUserId] as Timestamp?;
+                      final pinnedMap = chatData['pinnedMessage'] as Map<String, dynamic>?;
+                      pinnedMessageId = pinnedMap?['id'] as String?;
                     }
 
                     return StreamBuilder<QuerySnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('chats')
-                      .doc(_chatId)
-                      .collection('messages')
-                      .orderBy('sentAt', descending: true)
-                      .snapshots(),
+                  stream: _messagesStream,
                   builder: (context, snapshot) {
                     if (snapshot.connectionState == ConnectionState.waiting) {
                       return Center(
@@ -535,7 +834,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       );
                     }
 
-                    final docs = snapshot.data?.docs ?? [];
+                    var docs = snapshot.data?.docs ?? [];
 
                     // If the newest message just arrived from the other
                     // person while I'm actively looking at this screen,
@@ -549,18 +848,34 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
                     }
 
+                    if (_searchQuery.isNotEmpty) {
+                      docs = docs.where((doc) {
+                        final data = doc.data() as Map<String, dynamic>;
+                        if (data['deleted'] == true) return false;
+                        final text = (data['text'] as String? ?? '').toLowerCase();
+                        return text.contains(_searchQuery);
+                      }).toList();
+                    }
+
                     if (docs.isEmpty) {
+                      final noResults = _searchQuery.isNotEmpty;
                       return Center(
                         child: Padding(
                           padding: EdgeInsets.all(24),
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.chat_bubble_outline,
+                              Icon(
+                                  noResults
+                                      ? Icons.search_off
+                                      : Icons.chat_bubble_outline,
                                   size: 56, color: AppColors.primary.withValues(alpha: 0.3)),
                               SizedBox(height: 12),
                               Text(
-                                'Say hi to ${widget.otherUserName} 👋',
+                                noResults
+                                    ? 'No messages match "$_searchQuery"'
+                                    : 'Say hi to ${widget.otherUserName} 👋',
+                                textAlign: TextAlign.center,
                                 style: TextStyle(color: Colors.grey, fontSize: 14),
                               ),
                             ],
@@ -598,6 +913,25 @@ class _ChatScreenState extends State<ChatScreen> {
                         final replyToText = data['replyToText'] as String?;
                         final replyToSenderName = data['replyToSenderName'] as String?;
                         final replyActionText = imageBytes != null ? '📷 Photo' : text;
+                        final reactions =
+                            (data['reactions'] as Map<String, dynamic>?) ?? {};
+                        final isEdited = data['edited'] == true;
+                        final isPinnedMsg = pinnedMessageId == doc.id;
+
+                        // Group reactions by emoji so identical reactions
+                        // from different people collapse into one chip
+                        // with a count, instead of one chip per person.
+                        final Map<String, int> reactionCounts = {};
+                        bool iReacted = false;
+                        String? myReaction;
+                        reactions.forEach((uid, emoji) {
+                          reactionCounts[emoji as String] =
+                              (reactionCounts[emoji] ?? 0) + 1;
+                          if (uid == _currentUserId) {
+                            iReacted = true;
+                            myReaction = emoji;
+                          }
+                        });
 
                         return GestureDetector(
                           onLongPress: isDeleted
@@ -607,7 +941,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                     isMine: isMine,
                                     text: replyActionText,
                                     senderName: isMine ? 'You' : widget.otherUserName,
+                                    isImage: imageBytes != null,
+                                    isPinned: isPinnedMsg,
                                   ),
+                          onDoubleTap: isDeleted
+                              ? null
+                              : () => _toggleReaction(doc.id, '❤️'),
                           child: Align(
                           alignment:
                               isMine ? Alignment.centerRight : Alignment.centerLeft,
@@ -629,6 +968,14 @@ class _ChatScreenState extends State<ChatScreen> {
                               border: isMine
                                   ? null
                                   : Border.all(color: AppColors.fieldBorder),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: (isMine ? AppColors.primary : Colors.black)
+                                      .withValues(alpha: 0.08),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.end,
@@ -686,10 +1033,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onTap: () {
                                       Navigator.push(
                                         context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              _FullscreenImageViewer(imageBytes: imageBytes!),
-                                        ),
+                                        slideRoute(_FullscreenImageViewer(imageBytes: imageBytes!)),
                                       );
                                     },
                                     child: ClipRRect(
@@ -725,6 +1069,18 @@ class _ChatScreenState extends State<ChatScreen> {
                                 Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
+                                    if (isEdited && !isDeleted) ...[
+                                      Text(
+                                        'edited · ',
+                                        style: TextStyle(
+                                          color: isMine
+                                              ? Colors.white.withValues(alpha: 0.6)
+                                              : Colors.grey,
+                                          fontSize: 10,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                    ],
                                     Text(
                                       _formatTime(sentAt),
                                       style: TextStyle(
@@ -746,6 +1102,53 @@ class _ChatScreenState extends State<ChatScreen> {
                                     ],
                                   ],
                                 ),
+                                if (reactionCounts.isNotEmpty && !isDeleted)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Wrap(
+                                      spacing: 4,
+                                      children: reactionCounts.entries.map((e) {
+                                        final mine = iReacted && myReaction == e.key;
+                                        return Pressable(
+                                          onTap: () => _toggleReaction(doc.id, e.key),
+                                          child: Container(
+                                            padding: EdgeInsets.symmetric(
+                                                horizontal: 7, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: mine
+                                                  ? AppColors.accent.withValues(alpha: 0.25)
+                                                  : (isMine
+                                                      ? Colors.white.withValues(alpha: 0.18)
+                                                      : AppColors.background),
+                                              borderRadius: BorderRadius.circular(12),
+                                              border: mine
+                                                  ? Border.all(color: AppColors.accent, width: 1)
+                                                  : null,
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(e.key, style: TextStyle(fontSize: 12)),
+                                                if (e.value > 1) ...[
+                                                  SizedBox(width: 3),
+                                                  Text(
+                                                    '${e.value}',
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      fontWeight: FontWeight.w600,
+                                                      color: isMine
+                                                          ? Colors.white
+                                                          : AppColors.primaryDark,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ),
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
                               ],
                             ),
                           ),
@@ -759,7 +1162,38 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-            if (_replyingToText != null)
+            if (_editingMessageId != null)
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: AppColors.fieldFill,
+                  border: Border(
+                    top: BorderSide(color: AppColors.fieldBorder),
+                    left: BorderSide(color: AppColors.accent, width: 3),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.edit_outlined, size: 16, color: AppColors.accent),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Editing message',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primaryDark,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.close, size: 18, color: Colors.grey),
+                      onPressed: _cancelEditing,
+                    ),
+                  ],
+                ),
+              )
+            else if (_replyingToText != null)
               Container(
                 padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
@@ -862,7 +1296,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               child: CircularProgressIndicator(
                                   color: Colors.white, strokeWidth: 2),
                             )
-                          : Icon(Icons.send, color: Colors.white, size: 20),
+                          : Icon(_editingMessageId != null ? Icons.check : Icons.send,
+                              color: Colors.white, size: 20),
                       onPressed: _isSending ? null : _sendMessage,
                     ),
                   ),
@@ -876,6 +1311,103 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// All photos shared in this chat, newest first, in a grid — tapping one
+/// opens it full-screen. Reuses the same messages subcollection instead of
+/// a separate media index, since a single chat's photo count is small
+/// enough to filter client-side.
+class _ChatMediaGalleryScreen extends StatelessWidget {
+  final String chatId;
+
+  const _ChatMediaGalleryScreen({required this.chatId});
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .orderBy('sentAt', descending: true)
+        .snapshots();
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: buildAppBar(title: 'Shared Photos'),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: stream,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator(color: AppColors.primary));
+          }
+
+          final imageDocs = (snapshot.data?.docs ?? []).where((doc) {
+            final data = doc.data() as Map<String, dynamic>;
+            if (data['deleted'] == true) return false;
+            final img = data['imageBase64'] as String?;
+            return img != null && img.isNotEmpty;
+          }).toList();
+
+          if (imageDocs.isEmpty) {
+            return Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.image_outlined,
+                        size: 56, color: AppColors.primary.withValues(alpha: 0.3)),
+                    SizedBox(height: 12),
+                    Text('No photos shared yet',
+                        style: TextStyle(color: Colors.grey, fontSize: 14)),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          return GridView.builder(
+            padding: EdgeInsets.all(10),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 6,
+              mainAxisSpacing: 6,
+            ),
+            itemCount: imageDocs.length,
+            itemBuilder: (context, index) {
+              final data = imageDocs[index].data() as Map<String, dynamic>;
+              Uint8List? bytes;
+              try {
+                bytes = base64Decode(data['imageBase64'] as String);
+              } catch (_) {
+                bytes = null;
+              }
+              if (bytes == null) {
+                return ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    color: AppColors.fieldFill,
+                    child: Icon(Icons.broken_image_outlined, color: Colors.grey),
+                  ),
+                );
+              }
+              final imgBytes = bytes;
+              return GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  slideRoute(_FullscreenImageViewer(imageBytes: imgBytes)),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.memory(imgBytes, fit: BoxFit.cover),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
